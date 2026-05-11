@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/storage"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -421,4 +422,61 @@ func (h *Handler) deleteS3Objects(ctx context.Context, urls []string) {
 		keys[i] = h.Storage.KeyFromURL(u)
 	}
 	h.Storage.DeleteKeys(ctx, keys)
+}
+
+// ---------------------------------------------------------------------------
+// ServeLocalUpload — GET /uploads/* (local storage only, authenticated)
+// ---------------------------------------------------------------------------
+//
+// Keys are namespaced by the writer of /api/upload-file:
+//
+//   - "workspaces/<wsId>/<file>" — attachment uploaded into a workspace.
+//     Caller MUST be a member of <wsId>.
+//   - "users/<userId>/<file>"    — user-private asset (e.g. avatar).
+//     Caller MUST be <userId>.
+//
+// Any other shape (no prefix, missing UUID segment) is rejected with 404.
+// Unauthorized access also returns 404 rather than 401/403 so the route does
+// not leak the existence of attachment names to scanners.
+func (h *Handler) ServeLocalUpload(local *storage.LocalStorage) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := requireUserID(w, r)
+		if !ok {
+			return
+		}
+
+		key := strings.TrimPrefix(r.URL.Path, "/uploads/")
+		key = strings.TrimLeft(key, "/")
+		if key == "" || strings.Contains(key, "..") {
+			http.NotFound(w, r)
+			return
+		}
+
+		segments := strings.SplitN(key, "/", 3)
+		if len(segments) < 3 {
+			// Legacy / unscoped key — deny by default; the upload path always
+			// writes one of the two namespaced prefixes.
+			http.NotFound(w, r)
+			return
+		}
+
+		switch segments[0] {
+		case "workspaces":
+			workspaceID := segments[1]
+			if _, err := h.getWorkspaceMember(r.Context(), userID, workspaceID); err != nil {
+				http.NotFound(w, r)
+				return
+			}
+		case "users":
+			if segments[1] != userID {
+				http.NotFound(w, r)
+				return
+			}
+		default:
+			http.NotFound(w, r)
+			return
+		}
+
+		local.ServeFile(w, r, key)
+	}
 }

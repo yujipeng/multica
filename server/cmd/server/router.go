@@ -196,14 +196,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		realtime.HandleWebSocket(hub, mc, pr, slugResolver, w, r)
 	})
 
-	// Local file serving (when using local storage)
-	if local, ok := store.(*storage.LocalStorage); ok {
-		r.Get("/uploads/*", func(w http.ResponseWriter, r *http.Request) {
-			file := strings.TrimPrefix(r.URL.Path, "/uploads/")
-			local.ServeFile(w, r, file)
-		})
-	}
-
 	// Auth (public)
 	r.Post("/auth/send-code", h.SendCode)
 	r.Post("/auth/verify-code", h.VerifyCode)
@@ -264,6 +256,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/api/cli-token", h.IssueCliToken)
 		r.Post("/api/upload-file", h.UploadFile)
 		r.Post("/api/feedback", h.CreateFeedback)
+
+		// Local file serving (only when using local storage). Authenticated +
+		// workspace-scoped: keys are namespaced as either
+		// "workspaces/<wsId>/<file>" (attachments) or "users/<userId>/<file>"
+		// (user-private assets like avatars). Each branch enforces its own
+		// access check; anything else returns 404 to avoid leaking existence.
+		if local, ok := store.(*storage.LocalStorage); ok {
+			r.Get("/uploads/*", h.ServeLocalUpload(local))
+		}
 
 		r.Route("/api/workspaces", func(r chi.Router) {
 			r.Get("/", h.ListWorkspaces)
