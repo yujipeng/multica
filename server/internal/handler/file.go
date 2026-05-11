@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -435,9 +436,17 @@ func (h *Handler) deleteS3Objects(ctx context.Context, urls []string) {
 //   - "users/<userId>/<file>"    — user-private asset (e.g. avatar).
 //     Caller MUST be <userId>.
 //
-// Any other shape (no prefix, missing UUID segment) is rejected with 404.
-// Unauthorized access also returns 404 rather than 401/403 so the route does
-// not leak the existence of attachment names to scanners.
+// Any other shape (no prefix, missing UUID segment, trailing slash so the
+// third segment is empty, or a path that resolves to a directory) is
+// rejected with 404. Returning 404 (rather than 401/403/200-with-index) keeps
+// the route from leaking either attachment names or directory layout to
+// scanners. Directory listing in particular is enforced by two layers:
+//
+//  1. We refuse keys whose third segment is empty (so /uploads/workspaces/<ws>/
+//     and /uploads/users/<u>/ never reach storage), and
+//  2. We os.Stat the resolved path before serving; any directory target —
+//     including future shapes we haven't anticipated — short-circuits to
+//     404 before http.ServeFile can autogenerate an HTML index.
 func (h *Handler) ServeLocalUpload(local *storage.LocalStorage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := requireUserID(w, r)
@@ -447,15 +456,21 @@ func (h *Handler) ServeLocalUpload(local *storage.LocalStorage) http.HandlerFunc
 
 		key := strings.TrimPrefix(r.URL.Path, "/uploads/")
 		key = strings.TrimLeft(key, "/")
+		// `..` rejection here is belt-and-suspenders: upload keys are
+		// UUID-based filenames so they never legitimately contain `..`,
+		// and http.ServeFile already normalises path traversal. Both
+		// layers stay because they are cheap and independently sufficient.
 		if key == "" || strings.Contains(key, "..") {
 			http.NotFound(w, r)
 			return
 		}
 
 		segments := strings.SplitN(key, "/", 3)
-		if len(segments) < 3 {
-			// Legacy / unscoped key — deny by default; the upload path always
-			// writes one of the two namespaced prefixes.
+		// Reject any key that does not have all three of {prefix, owner,
+		// filename}. The empty-third-segment case (e.g. "workspaces/<ws>/")
+		// is what would otherwise let an authenticated member fetch an
+		// HTML directory index via http.ServeFile.
+		if len(segments) < 3 || segments[2] == "" {
 			http.NotFound(w, r)
 			return
 		}
@@ -473,6 +488,17 @@ func (h *Handler) ServeLocalUpload(local *storage.LocalStorage) http.HandlerFunc
 				return
 			}
 		default:
+			http.NotFound(w, r)
+			return
+		}
+
+		// Second layer: even with a non-empty third segment, refuse to
+		// serve anything that resolves to a directory. This protects
+		// against any future key shape that slips past the prefix parser
+		// (e.g. nested dirs under workspaces/<ws>/) and matches http.ServeFile's
+		// own behavior of generating an index for directory targets.
+		info, err := os.Stat(local.GetFilePath(key))
+		if err != nil || info.IsDir() {
 			http.NotFound(w, r)
 			return
 		}

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/storage"
@@ -150,6 +151,80 @@ func TestServeLocalUpload_RejectsPathTraversal(t *testing.T) {
 	testHandler.ServeLocalUpload(local).ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("path traversal: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestServeLocalUpload_RejectsTrailingSlashDirectoryListing(t *testing.T) {
+	// P0-1 regression: a workspace member must NOT be able to coerce
+	// http.ServeFile into emitting an HTML directory index by hitting
+	// "/uploads/workspaces/<wsId>/" with a trailing slash. The old guard
+	// (len(segments) < 3) accepted segments == ["workspaces", "<wsId>", ""]
+	// because SplitN produces a 3-element slice for that input.
+	if testHandler == nil {
+		t.Skip("test fixture not initialized; needs DATABASE_URL")
+	}
+	local, dir := newLocalForTest(t)
+	// Pre-create some files in the workspace dir; the test passes only if
+	// none of these names appear in the response body.
+	writeKey(t, dir, "workspaces/"+testWorkspaceID+"/secret-a.txt", "AAA")
+	writeKey(t, dir, "workspaces/"+testWorkspaceID+"/secret-b.txt", "BBB")
+
+	req := httptest.NewRequest(http.MethodGet, "/uploads/workspaces/"+testWorkspaceID+"/", nil)
+	req.Header.Set("X-User-ID", testUserID)
+	w := httptest.NewRecorder()
+	testHandler.ServeLocalUpload(local).ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("trailing-slash dir request: expected 404, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "secret-a.txt") || strings.Contains(body, "secret-b.txt") || strings.Contains(body, "<a href=") {
+		t.Fatalf("response leaked directory contents: %q", body)
+	}
+}
+
+func TestServeLocalUpload_RejectsTrailingSlashUserDir(t *testing.T) {
+	// Same regression for the users/<userId>/ namespace.
+	if testHandler == nil {
+		t.Skip("test fixture not initialized; needs DATABASE_URL")
+	}
+	local, dir := newLocalForTest(t)
+	writeKey(t, dir, "users/"+testUserID+"/avatar.png", "PNG")
+
+	req := httptest.NewRequest(http.MethodGet, "/uploads/users/"+testUserID+"/", nil)
+	req.Header.Set("X-User-ID", testUserID)
+	w := httptest.NewRecorder()
+	testHandler.ServeLocalUpload(local).ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("user trailing-slash request: expected 404, got %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "avatar.png") || strings.Contains(w.Body.String(), "<a href=") {
+		t.Fatalf("response leaked user-private dir listing")
+	}
+}
+
+func TestServeLocalUpload_RejectsNestedDirectoryTarget(t *testing.T) {
+	// Even when the third segment is non-empty, the resolved path must
+	// not be a directory. Belt-and-suspenders against future key shapes.
+	if testHandler == nil {
+		t.Skip("test fixture not initialized; needs DATABASE_URL")
+	}
+	local, dir := newLocalForTest(t)
+	// Create a nested directory with files; key segment count is fine
+	// (workspaces/<wsId>/sub) but it resolves to a directory.
+	writeKey(t, dir, "workspaces/"+testWorkspaceID+"/sub/inner.txt", "inner")
+
+	req := httptest.NewRequest(http.MethodGet, "/uploads/workspaces/"+testWorkspaceID+"/sub", nil)
+	req.Header.Set("X-User-ID", testUserID)
+	w := httptest.NewRecorder()
+	testHandler.ServeLocalUpload(local).ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("nested dir target: expected 404, got %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "inner.txt") || strings.Contains(w.Body.String(), "<a href=") {
+		t.Fatalf("response leaked nested directory listing")
 	}
 }
 
