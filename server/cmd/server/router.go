@@ -152,6 +152,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Use(opts.HTTPMetrics.Middleware)
 	}
 	r.Use(chimw.Recoverer)
+	// Global body cap. Most JSON endpoints take well under 1 MiB; upload /
+	// onboarding / feedback handlers reapply their own larger limits, and
+	// the middleware skips those prefixes so it does not become the
+	// bottleneck. Added for JEE-12 P1-8 to prevent OOM by unbounded
+	// JSON-write requests.
+	r.Use(middleware.BodyLimit)
 	r.Use(middleware.ContentSecurityPolicy)
 	origins := allowedOrigins()
 
@@ -204,11 +210,19 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		})
 	}
 
-	// Auth (public)
-	r.Post("/auth/send-code", h.SendCode)
-	r.Post("/auth/verify-code", h.VerifyCode)
-	r.Post("/auth/google", h.GoogleLogin)
-	r.Post("/auth/logout", h.Logout)
+	// Auth (public). Wrapped with an IP-based rate limiter to defend
+	// against credential stuffing / verification-code brute force.
+	// JEE-12 P1-2 — IP-only is intentional: at this point we have no
+	// user identity yet, and the SendCode handler still enforces its
+	// own per-email 60s throttle on top of this.
+	authRateLimiter := middleware.NewRateLimiter(30, time.Minute)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.IPRateLimit(authRateLimiter))
+		r.Post("/auth/send-code", h.SendCode)
+		r.Post("/auth/verify-code", h.VerifyCode)
+		r.Post("/auth/google", h.GoogleLogin)
+		r.Post("/auth/logout", h.Logout)
+	})
 
 	// Public API
 	r.Get("/api/config", h.GetConfig)
@@ -249,9 +263,14 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	})
 
 	// Protected API routes
+	// Per-user rate limiter for authenticated requests. 600 req/min is
+	// generous for a person clicking around the UI but cuts off
+	// runaway scripts and broken integrations early. JEE-12 P1-2.
+	protectedRateLimiter := middleware.NewRateLimiter(600, time.Minute)
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(queries, patCache))
 		r.Use(middleware.RefreshCloudFrontCookies(cfSigner))
+		r.Use(middleware.UserOrIPRateLimit(protectedRateLimiter))
 
 		// --- User-scoped routes (no workspace context required) ---
 		r.Get("/api/me", h.GetMe)

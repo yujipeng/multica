@@ -290,9 +290,18 @@ func main() {
 		HeartbeatScheduler: heartbeatScheduler,
 	})
 
+	// Default timeouts mitigate Slowloris and slow-body DoS. Long-running
+	// upload / SSE / WebSocket paths use hijacked or streamed connections
+	// where these limits do not apply directly; tune via env vars when a
+	// deployment legitimately needs longer per-request budgets.
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: envDuration("HTTP_READ_HEADER_TIMEOUT", 10*time.Second),
+		ReadTimeout:       envDuration("HTTP_READ_TIMEOUT", 60*time.Second),
+		WriteTimeout:      envDuration("HTTP_WRITE_TIMEOUT", 120*time.Second),
+		IdleTimeout:       envDuration("HTTP_IDLE_TIMEOUT", 120*time.Second),
+		MaxHeaderBytes:    int(envPositiveInt64("HTTP_MAX_HEADER_BYTES", 1<<20)),
 	}
 
 	// Start background workers.
