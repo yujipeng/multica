@@ -391,6 +391,16 @@ WHERE issue_id = $1 AND status IN ('queued', 'dispatched');
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued', 'dispatched');
 
+-- name: HasActiveTaskForIssueAndAgent :one
+-- Returns true if a specific agent has any queued, dispatched, OR running
+-- task for the given issue. Used by the agent-comment cross-issue parent
+-- check (JEE-12 F-1): if an agent's X-Task-ID points at a task on issue
+-- A but the agent is also posting on issue B, we must reject when the
+-- agent has no legitimate work on issue B — that's a sign of a resumed
+-- session writing to the wrong thread.
+SELECT count(*) > 0 AS has_active FROM agent_task_queue
+WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued', 'dispatched', 'running');
+
 -- name: ListPendingTasksByRuntime :many
 SELECT * FROM agent_task_queue
 WHERE runtime_id = $1 AND status IN ('queued', 'dispatched')

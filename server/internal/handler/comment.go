@@ -191,16 +191,42 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// request, so an agent legitimately commenting on a different issue must
 	// not be blocked by its current task's trigger. Assignment-triggered
 	// tasks (no TriggerCommentID) are also unaffected.
+	//
+	// Cross-issue tightening (JEE-12 F-1): when the agent's X-Task-ID
+	// points at issue A but they are commenting on issue B, also
+	// require that the agent has a real active task on issue B.
+	// Otherwise it's almost certainly a resumed session writing to the
+	// wrong thread, and we'd rather reject it than misplace the reply
+	// in production data.
 	if authorType == "agent" {
 		if taskIDHeader := r.Header.Get("X-Task-ID"); taskIDHeader != "" {
 			taskUUID, parseErr := util.ParseUUID(taskIDHeader)
 			if parseErr == nil {
 				task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
-				if err == nil && task.TriggerCommentID.Valid && uuidToString(task.IssueID) == uuidToString(issue.ID) {
-					if uuidToString(parentID) != uuidToString(task.TriggerCommentID) {
-						writeError(w, http.StatusConflict,
-							"parent_id must equal this task's trigger comment id ("+uuidToString(task.TriggerCommentID)+")")
-						return
+				if err == nil {
+					sameIssue := uuidToString(task.IssueID) == uuidToString(issue.ID)
+					if sameIssue && task.TriggerCommentID.Valid {
+						if uuidToString(parentID) != uuidToString(task.TriggerCommentID) {
+							writeError(w, http.StatusConflict,
+								"parent_id must equal this task's trigger comment id ("+uuidToString(task.TriggerCommentID)+")")
+							return
+						}
+					} else if !sameIssue {
+						authorUUID := parseUUID(authorID)
+						hasActive, err := h.Queries.HasActiveTaskForIssueAndAgent(r.Context(), db.HasActiveTaskForIssueAndAgentParams{
+							IssueID: issue.ID,
+							AgentID: authorUUID,
+						})
+						if err == nil && !hasActive {
+							slog.Info("comment: rejecting agent cross-issue post without active task",
+								append(logger.RequestAttrs(r),
+									"agent_id", authorID,
+									"task_issue_id", uuidToString(task.IssueID),
+									"target_issue_id", uuidToString(issue.ID))...)
+							writeError(w, http.StatusConflict,
+								"agent cannot post on this issue without an active task on it")
+							return
+						}
 					}
 				}
 			}
