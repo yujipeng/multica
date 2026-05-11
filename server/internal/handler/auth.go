@@ -443,6 +443,72 @@ type googleUserInfo struct {
 	Picture string `json:"picture"`
 }
 
+// googleTokenEndpointEnv lets tests redirect the Google token exchange
+// to a local httptest.Server. In production this env var is never set;
+// the default is the real Google endpoint.
+const googleTokenEndpointEnv = "MULTICA_TEST_GOOGLE_TOKEN_ENDPOINT"
+
+func googleTokenEndpoint() string {
+	if override := strings.TrimSpace(os.Getenv(googleTokenEndpointEnv)); override != "" {
+		return override
+	}
+	return "https://oauth2.googleapis.com/token"
+}
+
+// allowedGoogleRedirectURIs returns the server-side allowlist of acceptable
+// redirect_uri values. The list is the union of GOOGLE_REDIRECT_URI (the
+// primary callback) and the optional comma-separated GOOGLE_REDIRECT_URI_ALLOWLIST
+// for deployments that legitimately serve multiple front-ends (e.g. web +
+// desktop custom-scheme callback). The client never picks freely — it must
+// echo back one of these values verbatim, so an attacker cannot tamper with
+// the redirect_uri to intercept the authorization code.
+func allowedGoogleRedirectURIs() []string {
+	out := make([]string, 0, 2)
+	if primary := strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URI")); primary != "" {
+		out = append(out, primary)
+	}
+	for _, raw := range strings.Split(os.Getenv("GOOGLE_REDIRECT_URI_ALLOWLIST"), ",") {
+		uri := strings.TrimSpace(raw)
+		if uri == "" {
+			continue
+		}
+		dup := false
+		for _, existing := range out {
+			if existing == uri {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, uri)
+		}
+	}
+	return out
+}
+
+// resolveGoogleRedirectURI validates the client-requested redirect_uri
+// against the server-side allowlist. The OAuth token exchange requires the
+// redirect_uri to match the one used in the authorization request, so we
+// still have to send a value to Google — but we refuse to forward anything
+// the operator has not pre-approved. When the request body omits the field
+// the primary GOOGLE_REDIRECT_URI is used.
+func resolveGoogleRedirectURI(requested string) (string, error) {
+	allowed := allowedGoogleRedirectURIs()
+	if len(allowed) == 0 {
+		return "", errors.New("Google login is not configured")
+	}
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return allowed[0], nil
+	}
+	for _, candidate := range allowed {
+		if subtle.ConstantTimeCompare([]byte(candidate), []byte(requested)) == 1 {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("redirect_uri is not in the allowlist")
+}
+
 func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 	var req GoogleLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -462,13 +528,15 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURI := req.RedirectURI
-	if redirectURI == "" {
-		redirectURI = os.Getenv("GOOGLE_REDIRECT_URI")
+	redirectURI, err := resolveGoogleRedirectURI(req.RedirectURI)
+	if err != nil {
+		slog.Warn("google oauth redirect_uri rejected", "error", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// Exchange authorization code for tokens.
-	tokenResp, err := http.PostForm("https://oauth2.googleapis.com/token", url.Values{
+	tokenResp, err := http.PostForm(googleTokenEndpoint(), url.Values{
 		"code":          {req.Code},
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
@@ -500,27 +568,34 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch user info from Google.
-	userInfoReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://www.googleapis.com/oauth2/v2/userinfo", nil)
-	if err != nil {
-		slog.Error("failed to create userinfo request", "error", err)
+	// Verify the id_token. This is the only claim we trust for identity —
+	// userinfo (Bearer access_token → /oauth2/v2/userinfo) authenticates the
+	// *holder* of the access token, which is a weaker assertion: any
+	// access_token issued by *any* Google OAuth client can call userinfo
+	// and return that user's email. id_token, by contrast, is signed by
+	// Google with `aud` pinned to OUR client_id, so a replay across OAuth
+	// apps cannot fool us.
+	if gToken.IDToken == "" {
+		slog.Warn("google oauth response missing id_token", append(logger.RequestAttrs(r), "client_id", clientID)...)
+		writeError(w, http.StatusBadGateway, "Google did not return an id_token")
+		return
+	}
+	if h.GoogleIDVerifier == nil {
+		slog.Error("google id_token verifier not configured")
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	userInfoReq.Header.Set("Authorization", "Bearer "+gToken.AccessToken)
-
-	userInfoResp, err := http.DefaultClient.Do(userInfoReq)
+	idClaims, err := h.GoogleIDVerifier.Verify(r.Context(), gToken.IDToken, clientID)
 	if err != nil {
-		slog.Error("google userinfo fetch failed", "error", err)
-		writeError(w, http.StatusBadGateway, "failed to fetch user info from Google")
+		slog.Warn("google id_token verification failed", append(logger.RequestAttrs(r), "error", err)...)
+		writeError(w, http.StatusUnauthorized, "Google id_token verification failed")
 		return
 	}
-	defer userInfoResp.Body.Close()
 
-	var gUser googleUserInfo
-	if err := json.NewDecoder(userInfoResp.Body).Decode(&gUser); err != nil {
-		writeError(w, http.StatusBadGateway, "failed to parse Google user info")
-		return
+	gUser := googleUserInfo{
+		Email:   idClaims.Email,
+		Name:    idClaims.Name,
+		Picture: idClaims.Picture,
 	}
 
 	if gUser.Email == "" {

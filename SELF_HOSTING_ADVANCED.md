@@ -41,8 +41,11 @@ Multica uses email-based magic link authentication via [Resend](https://resend.c
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
 | `GOOGLE_REDIRECT_URI` | OAuth callback URL (e.g. `https://app.example.com/auth/callback`) |
+| `GOOGLE_REDIRECT_URI_ALLOWLIST` | Optional, comma-separated extra callback URLs (e.g. a desktop custom-scheme callback). The backend rejects any client-supplied `redirect_uri` that is not exactly one of `GOOGLE_REDIRECT_URI` or a value in this list. |
 
 Changes take effect after restarting the backend / compose stack. The web UI reads `GOOGLE_CLIENT_ID` from `/api/config` at runtime, so no web rebuild is needed.
+
+The backend verifies Google's `id_token` against Google's JWKS on every login: signature, `iss`, `aud == GOOGLE_CLIENT_ID`, `exp`, and `email_verified` must all check out. A token issued for any other OAuth client is refused, even if it carries a valid access_token.
 
 ### Signup Controls (Optional)
 

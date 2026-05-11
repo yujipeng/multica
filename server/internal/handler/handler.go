@@ -80,6 +80,7 @@ type Handler struct {
 	Analytics             analytics.Client
 	PATCache              *auth.PATCache
 	DaemonTokenCache      *auth.DaemonTokenCache
+	GoogleIDVerifier      *auth.GoogleIDTokenVerifier
 	cfg                   Config
 }
 
@@ -119,6 +120,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		Storage:               store,
 		CFSigner:              cfSigner,
 		Analytics:             analyticsClient,
+		GoogleIDVerifier:      auth.NewGoogleIDTokenVerifier(nil),
 		cfg:                   cfg,
 	}
 }
