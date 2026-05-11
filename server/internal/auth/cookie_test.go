@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -96,6 +97,70 @@ func TestSetAuthCookies_HTTPSProduction(t *testing.T) {
 		}
 		if c.Domain != "app.example.com" {
 			t.Errorf("cookie %q Domain = %q, want %q", c.Name, c.Domain, "app.example.com")
+		}
+	}
+}
+
+// TestClearAuthCookies_ClearsCloudFront covers the logout path: every
+// CloudFront signed cookie set at login (Policy / Signature / Key-Pair-Id)
+// must be invalidated, otherwise a logged-out user on a shared browser
+// could keep reading private CDN assets for up to 30 days. Bug found in
+// the JEE-12 audit (P1-3).
+func TestClearAuthCookies_ClearsCloudFront(t *testing.T) {
+	t.Setenv("FRONTEND_ORIGIN", "https://app.example.com")
+	t.Setenv("COOKIE_DOMAIN", ".example.com")
+
+	rec := httptest.NewRecorder()
+	ClearAuthCookies(rec)
+
+	wantClear := map[string]bool{
+		AuthCookieName:             true,
+		CSRFCookieName:             true,
+		"CloudFront-Policy":        true,
+		"CloudFront-Signature":     true,
+		"CloudFront-Key-Pair-Id":   true,
+	}
+
+	for _, c := range rec.Result().Cookies() {
+		if !wantClear[c.Name] {
+			continue
+		}
+		if c.MaxAge != -1 {
+			t.Errorf("cookie %q MaxAge = %d, want -1 (delete)", c.Name, c.MaxAge)
+		}
+		delete(wantClear, c.Name)
+	}
+	for missing := range wantClear {
+		t.Errorf("cookie %q was not cleared", missing)
+	}
+}
+
+// TestClearAuthCookies_CloudFrontAttributesMatchSet ensures the deletion
+// cookies use the same (Secure, SameSite=None, Path=/) tuple as the
+// cookies emitted by CloudFrontSigner.SignedCookies. A mismatched
+// SameSite or Secure causes the browser to create a *new* tombstone
+// cookie under a different key without overwriting the original — the
+// CDN keeps serving private content. Anchored as a regression test for
+// the JEE-12 audit P1-3 fix.
+func TestClearAuthCookies_CloudFrontAttributesMatchSet(t *testing.T) {
+	t.Setenv("FRONTEND_ORIGIN", "https://app.example.com")
+	t.Setenv("COOKIE_DOMAIN", ".example.com")
+
+	rec := httptest.NewRecorder()
+	ClearAuthCookies(rec)
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Name != "CloudFront-Policy" && c.Name != "CloudFront-Signature" && c.Name != "CloudFront-Key-Pair-Id" {
+			continue
+		}
+		if !c.Secure {
+			t.Errorf("cookie %q must be Secure to match login-time signed cookies", c.Name)
+		}
+		if c.SameSite != http.SameSiteNoneMode {
+			t.Errorf("cookie %q SameSite = %v, want None (matches signed cookies)", c.Name, c.SameSite)
+		}
+		if c.Path != "/" {
+			t.Errorf("cookie %q Path = %q, want /", c.Name, c.Path)
 		}
 	}
 }

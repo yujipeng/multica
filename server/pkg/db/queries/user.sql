@@ -56,3 +56,24 @@ UPDATE "user" SET
     updated_at = now()
 WHERE id = $1
 RETURNING *;
+
+-- name: GetUserTokenVersion :one
+-- Returns the current token_version for a user. The Auth middleware
+-- compares the JWT's `tv` claim against this to invalidate tokens
+-- minted before the most recent revocation event (logout-all, password
+-- change, admin force-revoke). Returns 0 if the user does not exist —
+-- the caller still has to reject the request in that case via the
+-- normal GetUser lookup; this query is only used after that succeeds.
+SELECT token_version FROM "user"
+WHERE id = $1;
+
+-- name: BumpUserTokenVersion :one
+-- Increments token_version, invalidating every JWT minted for this
+-- user before the bump. The Logout / kick-session paths call this.
+-- Uses a returning so the caller can see the new value (useful for
+-- tests and for stamping the cache).
+UPDATE "user" SET
+    token_version = token_version + 1,
+    updated_at = now()
+WHERE id = $1
+RETURNING token_version;

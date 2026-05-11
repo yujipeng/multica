@@ -117,7 +117,19 @@ func SetAuthCookies(w http.ResponseWriter, token string) error {
 	return nil
 }
 
-// ClearAuthCookies removes the auth and CSRF cookies.
+// CloudFront signed cookies, also cleared on logout so a shared browser
+// can't reuse them to read private CDN assets after the session ends.
+// Names must match cloudfront.go:SignedCookies exactly.
+var cloudFrontCookieNames = []string{
+	"CloudFront-Policy",
+	"CloudFront-Signature",
+	"CloudFront-Key-Pair-Id",
+}
+
+// ClearAuthCookies removes the auth, CSRF, and CloudFront signed cookies.
+// The CloudFront cookies are emitted with the same attributes used when
+// signing (Secure + SameSite=None) so browsers actually overwrite the
+// originals rather than silently keeping the long-lived versions.
 func ClearAuthCookies(w http.ResponseWriter) {
 	domain := cookieDomain()
 	secure := isSecureCookie()
@@ -145,6 +157,28 @@ func ClearAuthCookies(w http.ResponseWriter) {
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
+
+	// CloudFront cookies were originally set with Secure=true and
+	// SameSite=None (see cloudfront.go:SignedCookies). Reuse those
+	// attributes here — the browser cookie store keys on
+	// (name, domain, path), and a mismatched Secure/SameSite combo
+	// would create a new tombstone cookie alongside the original
+	// instead of overwriting it. Domain falls back to cookieDomain()
+	// (typically the apex like ".multica.ai") since at logout we
+	// don't have the signer instance.
+	for _, name := range cloudFrontCookieNames {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			Domain:   domain,
+			MaxAge:   -1,
+			Expires:  time.Unix(0, 0),
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteNoneMode,
+		})
+	}
 }
 
 // ValidateCSRF checks the X-CSRF-Token header against the auth cookie.

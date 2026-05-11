@@ -248,10 +248,13 @@ func (h *Handler) UpdateLabel(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteLabel(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	workspaceID := h.resolveWorkspaceID(r)
-	userID, ok := requireUserID(w, r)
+	// Label delete is workspace-wide — gate to owner / admin so a single
+	// rogue member cannot wipe the workspace's label taxonomy (JEE-12 P1-5).
+	member, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin")
 	if !ok {
 		return
 	}
+	userID := uuidToString(member.UserID)
 	idUUID, ok := parseUUIDOrBadRequest(w, id, "label id")
 	if !ok {
 		return

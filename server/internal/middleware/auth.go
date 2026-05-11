@@ -116,6 +116,41 @@ func Auth(queries *db.Queries, patCache *auth.PATCache) func(http.Handler) http.
 				http.Error(w, `{"error":"invalid claims"}`, http.StatusUnauthorized)
 				return
 			}
+
+			// JWT revocation: compare the token's `tv` claim against the
+			// current value in the users table. A bump (logout / password
+			// change / admin force-revoke) invalidates every token minted
+			// before it without waiting for exp. Tokens predating the
+			// `tv` rollout have no claim; we treat that as version 0.
+			//
+			// The lookup is best-effort: a transient DB error must not
+			// kick every authenticated request, so we let the request
+			// through on lookup failure and rely on regular failure
+			// modes elsewhere. The expected steady-state cost is one
+			// indexed PK lookup per request; if that becomes hot we can
+			// front it with the existing PAT cache or a similar TTL
+			// store.
+			if queries != nil {
+				if uid, parseErr := util.ParseUUID(sub); parseErr == nil {
+					if currentTV, err := queries.GetUserTokenVersion(r.Context(), uid); err == nil {
+						claimTV := int32(0)
+						switch raw := claims["tv"].(type) {
+						case float64:
+							claimTV = int32(raw)
+						case int:
+							claimTV = int32(raw)
+						case int64:
+							claimTV = int32(raw)
+						}
+						if claimTV < currentTV {
+							slog.Info("auth: token revoked (tv mismatch)", "path", r.URL.Path, "user_id", sub, "claim_tv", claimTV, "current_tv", currentTV)
+							http.Error(w, `{"error":"token revoked"}`, http.StatusUnauthorized)
+							return
+						}
+					}
+				}
+			}
+
 			r.Header.Set("X-User-ID", sub)
 			if email, ok := claims["email"].(string); ok {
 				r.Header.Set("X-User-Email", email)

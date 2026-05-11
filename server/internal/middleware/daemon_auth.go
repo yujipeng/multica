@@ -9,6 +9,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -190,6 +191,27 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 			if !ok || strings.TrimSpace(sub) == "" {
 				writeError(w, http.StatusUnauthorized, "invalid claims")
 				return
+			}
+			// See middleware/auth.go for the rationale on tv comparison.
+			if queries != nil {
+				if uid, parseErr := util.ParseUUID(sub); parseErr == nil {
+					if currentTV, err := queries.GetUserTokenVersion(r.Context(), uid); err == nil {
+						claimTV := int32(0)
+						switch raw := claims["tv"].(type) {
+						case float64:
+							claimTV = int32(raw)
+						case int:
+							claimTV = int32(raw)
+						case int64:
+							claimTV = int32(raw)
+						}
+						if claimTV < currentTV {
+							slog.Info("daemon_auth: token revoked (tv mismatch)", "path", r.URL.Path, "user_id", sub, "claim_tv", claimTV, "current_tv", currentTV)
+							writeError(w, http.StatusUnauthorized, "token revoked")
+							return
+						}
+					}
+				}
 			}
 			r.Header.Set("X-User-ID", sub)
 			ctx := context.WithValue(r.Context(), ctxKeyDaemonAuthPath, DaemonAuthPathJWT)

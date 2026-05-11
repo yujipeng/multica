@@ -271,3 +271,36 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 	)
 	return i, err
 }
+
+const getUserTokenVersion = `-- name: GetUserTokenVersion :one
+SELECT token_version FROM "user"
+WHERE id = $1
+`
+
+// Returns the current token_version for a user. The Auth middleware
+// compares the JWT's ` + "`tv`" + ` claim against this to invalidate tokens
+// minted before the most recent revocation event (logout-all, password
+// change, admin force-revoke).
+func (q *Queries) GetUserTokenVersion(ctx context.Context, id pgtype.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, getUserTokenVersion, id)
+	var token_version int32
+	err := row.Scan(&token_version)
+	return token_version, err
+}
+
+const bumpUserTokenVersion = `-- name: BumpUserTokenVersion :one
+UPDATE "user" SET
+    token_version = token_version + 1,
+    updated_at = now()
+WHERE id = $1
+RETURNING token_version
+`
+
+// Increments token_version, invalidating every JWT minted for this
+// user before the bump. The Logout / kick-session paths call this.
+func (q *Queries) BumpUserTokenVersion(ctx context.Context, id pgtype.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, bumpUserTokenVersion, id)
+	var token_version int32
+	err := row.Scan(&token_version)
+	return token_version, err
+}

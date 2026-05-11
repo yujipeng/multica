@@ -1906,12 +1906,17 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Validate the resulting assignee pair when this batch update touches
-		// either assignee field. Skip the issue silently on failure.
+		// Validate the resulting assignee pair when this batch update
+		// touches either assignee field. Use the issue's actual
+		// workspace (prevIssue.WorkspaceID) rather than the request's
+		// resolved workspaceID — they should already match because
+		// GetIssueInWorkspace filters, but anchoring on the per-row
+		// workspace is the explicit defence against the cross-tenant
+		// indirect-assignment regression flagged in JEE-12 P1-6.
 		_, batchTouchedType := rawUpdates["assignee_type"]
 		_, batchTouchedID := rawUpdates["assignee_id"]
 		if batchTouchedType || batchTouchedID {
-			if status, _ := h.validateAssigneePair(r.Context(), r, workspaceID, params.AssigneeType, params.AssigneeID); status != 0 {
+			if status, _ := h.validateAssigneePair(r.Context(), r, uuidToString(prevIssue.WorkspaceID), params.AssigneeType, params.AssigneeID); status != 0 {
 				continue
 			}
 		}

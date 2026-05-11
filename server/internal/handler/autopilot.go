@@ -238,6 +238,27 @@ func (h *Handler) loadAutopilotInWorkspace(w http.ResponseWriter, r *http.Reques
 	return autopilot, true
 }
 
+// canMutateAutopilot enforces the JEE-12 P1-5 policy: only the autopilot's
+// member creator OR a workspace owner/admin can update / delete / trigger
+// it (including managing triggers). Plain members can still read autopilots
+// they did not create — they just cannot destroy or force-run them. Writes
+// a 403 / 401 and returns false when the caller is not allowed, so the
+// destructive handler can early-return.
+func (h *Handler) canMutateAutopilot(w http.ResponseWriter, r *http.Request, workspaceID string, ap db.Autopilot, userID string) bool {
+	member, ok := h.workspaceMember(w, r, workspaceID)
+	if !ok {
+		return false
+	}
+	if roleAllowed(member.Role, "owner", "admin") {
+		return true
+	}
+	if ap.CreatedByType == "member" && uuidToString(ap.CreatedByID) == userID {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "only the autopilot creator or a workspace admin can perform this action")
+	return false
+}
+
 func (h *Handler) CreateAutopilot(w http.ResponseWriter, r *http.Request) {
 	var req CreateAutopilotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -321,6 +342,10 @@ func (h *Handler) UpdateAutopilot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.canMutateAutopilot(w, r, workspaceID, prev, userID) {
+		return
+	}
+
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body")
@@ -396,16 +421,20 @@ func (h *Handler) DeleteAutopilot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Queries.GetAutopilotInWorkspace(r.Context(), db.GetAutopilotInWorkspaceParams{
+	ap, err := h.Queries.GetAutopilotInWorkspace(r.Context(), db.GetAutopilotInWorkspaceParams{
 		ID:          idUUID,
 		WorkspaceID: wsUUID,
-	}); err != nil {
+	})
+	if err != nil {
 		writeError(w, http.StatusNotFound, "autopilot not found")
 		return
 	}
 
 	userID, ok := requireUserID(w, r)
 	if !ok {
+		return
+	}
+	if !h.canMutateAutopilot(w, r, workspaceID, ap, userID) {
 		return
 	}
 
@@ -426,6 +455,14 @@ func (h *Handler) CreateAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 
 	ap, ok := h.loadAutopilotInWorkspace(w, r, autopilotID, workspaceID)
 	if !ok {
+		return
+	}
+
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	if !h.canMutateAutopilot(w, r, workspaceID, ap, userID) {
 		return
 	}
 
@@ -483,7 +520,6 @@ func (h *Handler) CreateAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := triggerToResponse(trigger)
-	userID, _ := requireUserID(w, r)
 	h.publish(protocol.EventAutopilotUpdated, workspaceID, "member", userID, map[string]any{
 		"autopilot_id": uuidToString(ap.ID),
 		"trigger":      resp,
@@ -498,6 +534,14 @@ func (h *Handler) UpdateAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 
 	ap, ok := h.loadAutopilotInWorkspace(w, r, autopilotID, workspaceID)
 	if !ok {
+		return
+	}
+
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	if !h.canMutateAutopilot(w, r, workspaceID, ap, userID) {
 		return
 	}
 
@@ -572,7 +616,6 @@ func (h *Handler) UpdateAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := triggerToResponse(trigger)
-	userID, _ := requireUserID(w, r)
 	h.publish(protocol.EventAutopilotUpdated, workspaceID, "member", userID, map[string]any{
 		"autopilot_id": uuidToString(ap.ID),
 		"trigger":      resp,
@@ -598,10 +641,11 @@ func (h *Handler) DeleteAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if _, err := h.Queries.GetAutopilotInWorkspace(r.Context(), db.GetAutopilotInWorkspaceParams{
+	ap, err := h.Queries.GetAutopilotInWorkspace(r.Context(), db.GetAutopilotInWorkspaceParams{
 		ID:          autopilotUUID,
 		WorkspaceID: wsUUID,
-	}); err != nil {
+	})
+	if err != nil {
 		writeError(w, http.StatusNotFound, "autopilot not found")
 		return
 	}
@@ -614,6 +658,9 @@ func (h *Handler) DeleteAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 
 	userID, ok := requireUserID(w, r)
 	if !ok {
+		return
+	}
+	if !h.canMutateAutopilot(w, r, workspaceID, ap, userID) {
 		return
 	}
 
@@ -683,6 +730,17 @@ func (h *Handler) TriggerAutopilot(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	// Triggering consumes agent / runtime budget. Gate to creator or
+	// workspace admin — same predicate as autopilot CRUD per JEE-12 P1-5.
+	if !h.canMutateAutopilot(w, r, workspaceID, autopilot, userID) {
+		return
+	}
+
 	if autopilot.Status != "active" {
 		writeError(w, http.StatusBadRequest, "autopilot is not active")
 		return
@@ -690,7 +748,7 @@ func (h *Handler) TriggerAutopilot(w http.ResponseWriter, r *http.Request) {
 
 	run, err := h.AutopilotService.DispatchAutopilot(r.Context(), autopilot, pgtype.UUID{}, "manual", nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to trigger autopilot: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to trigger autopilot")
 		return
 	}
 

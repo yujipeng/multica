@@ -450,10 +450,14 @@ func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	userID, ok := requireUserID(w, r)
+	// Project delete CASCADEs to issues and resources — gate to
+	// workspace owner / admin only (JEE-12 P1-5). Plain members keep
+	// read access through other handlers; they just cannot destroy.
+	member, ok := h.requireWorkspaceRole(w, r, workspaceID, "project not found", "owner", "admin")
 	if !ok {
 		return
 	}
+	userID := uuidToString(member.UserID)
 	if err := h.Queries.DeleteProject(r.Context(), project.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete project")
 		return

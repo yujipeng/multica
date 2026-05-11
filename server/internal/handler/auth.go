@@ -21,6 +21,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/logger"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -135,10 +136,19 @@ func isSixDigitCode(code string) bool {
 }
 
 func (h *Handler) issueJWT(user db.User) (string, error) {
+	// Stamp the current token_version into the JWT so the Auth
+	// middleware can reject tokens minted before a logout / password
+	// change / admin force-revoke. We swallow lookup errors here
+	// because a missing row would have failed the GetUser that the
+	// caller did first, and any transient DB hiccup at this exact
+	// moment should not block login — the resulting JWT just lacks
+	// the `tv` claim and the middleware treats that as version 0.
+	tv, _ := h.Queries.GetUserTokenVersion(context.Background(), user.ID)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":   uuidToString(user.ID),
 		"email": user.Email,
 		"name":  user.Name,
+		"tv":    tv,
 		"exp":   time.Now().Add(30 * 24 * time.Hour).Unix(),
 		"iat":   time.Now().Unix(),
 	})
@@ -443,6 +453,14 @@ type googleUserInfo struct {
 	Picture string `json:"picture"`
 }
 
+// externalHTTPClient is the shared client for out-of-process calls
+// (Google OAuth token + userinfo, etc.). The default Go client has no
+// timeout, so a slow upstream can pin a goroutine and a server
+// connection until the kernel breaks it — the JEE-12 P2-2 / F-2
+// finding. 15s is comfortable for an OAuth round-trip and short
+// enough that operators notice degradations.
+var externalHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 	var req GoogleLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -468,13 +486,24 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange authorization code for tokens.
-	tokenResp, err := http.PostForm("https://oauth2.googleapis.com/token", url.Values{
-		"code":          {req.Code},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
-		"redirect_uri":  {redirectURI},
-		"grant_type":    {"authorization_code"},
-	})
+	// PostForm uses http.DefaultClient (no timeout); construct an
+	// explicit request so we can pin it to externalHTTPClient and
+	// inherit the bounded timeout.
+	tokenReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "https://oauth2.googleapis.com/token",
+		strings.NewReader(url.Values{
+			"code":          {req.Code},
+			"client_id":     {clientID},
+			"client_secret": {clientSecret},
+			"redirect_uri":  {redirectURI},
+			"grant_type":    {"authorization_code"},
+		}.Encode()))
+	if err != nil {
+		slog.Error("google oauth token request build failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenResp, err := externalHTTPClient.Do(tokenReq)
 	if err != nil {
 		slog.Error("google oauth token exchange failed", "error", err)
 		writeError(w, http.StatusBadGateway, "failed to exchange code with Google")
@@ -509,7 +538,7 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	userInfoReq.Header.Set("Authorization", "Bearer "+gToken.AccessToken)
 
-	userInfoResp, err := http.DefaultClient.Do(userInfoReq)
+	userInfoResp, err := externalHTTPClient.Do(userInfoReq)
 	if err != nil {
 		slog.Error("google userinfo fetch failed", "error", err)
 		writeError(w, http.StatusBadGateway, "failed to fetch user info from Google")
@@ -622,6 +651,20 @@ func (h *Handler) IssueCliToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	// Bump token_version so any JWT still held by the client (browser
+	// localStorage, native app keychain, leaked logs) is rejected by
+	// the Auth middleware on the next request. Cookie/CSRF clear is
+	// best-effort UX — token_version is the actual revocation.
+	// Only attempt the bump when the request was authenticated; the
+	// route is behind middleware.Auth so userID is expected, but log
+	// without failing if it is missing or invalid.
+	if userID := requestUserID(r); userID != "" {
+		if uid, err := util.ParseUUID(userID); err == nil {
+			if _, bumpErr := h.Queries.BumpUserTokenVersion(r.Context(), uid); bumpErr != nil {
+				slog.Warn("logout: failed to bump token_version", "user_id", userID, "error", bumpErr)
+			}
+		}
+	}
 	auth.ClearAuthCookies(w)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
 }
