@@ -217,7 +217,20 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 							IssueID: issue.ID,
 							AgentID: authorUUID,
 						})
-						if err == nil && !hasActive {
+						if err != nil {
+							// DB error path: we follow the broader "fail
+							// open on transient DB blip" stance used for
+							// the JWT tv-claim check in middleware.Auth,
+							// but log loudly so an audit trail exists for
+							// the rare cross-issue post that slipped past
+							// the gate (JEE-12 N-3).
+							slog.Warn("comment: cross-issue active-task check failed, allowing post",
+								append(logger.RequestAttrs(r),
+									"agent_id", authorID,
+									"task_issue_id", uuidToString(task.IssueID),
+									"target_issue_id", uuidToString(issue.ID),
+									"error", err)...)
+						} else if !hasActive {
 							slog.Info("comment: rejecting agent cross-issue post without active task",
 								append(logger.RequestAttrs(r),
 									"agent_id", authorID,

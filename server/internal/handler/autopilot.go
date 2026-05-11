@@ -244,6 +244,15 @@ func (h *Handler) loadAutopilotInWorkspace(w http.ResponseWriter, r *http.Reques
 // they did not create — they just cannot destroy or force-run them. Writes
 // a 403 / 401 and returns false when the caller is not allowed, so the
 // destructive handler can early-return.
+//
+// Agent-created autopilots intentionally fall through to the
+// owner/admin branch (JEE-12 N-2): the calling user is acting as
+// themselves on the autopilot route, not as the creating agent, so
+// "creator self-mutation" only applies when the creator was a member.
+// Practical effect: an autopilot that an agent provisioned can only
+// be touched by workspace owner/admin; if that proves too tight for
+// some workflow, route the mutation through the agent's own task
+// flow instead of relaxing this gate.
 func (h *Handler) canMutateAutopilot(w http.ResponseWriter, r *http.Request, workspaceID string, ap db.Autopilot, userID string) bool {
 	member, ok := h.workspaceMember(w, r, workspaceID)
 	if !ok {
