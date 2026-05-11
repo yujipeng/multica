@@ -117,15 +117,24 @@ func IPRateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 	}
 }
 
-// UserOrIPRateLimit returns middleware that rate limits by user_id
-// when one is present (set by Auth middleware via X-User-ID) and
-// falls back to client IP otherwise. Designed for authenticated
-// write endpoints where the user is the right bucket key.
+// UserOrIPRateLimit returns middleware that rate limits by the
+// authenticated user_id when one is present in the request context
+// (set only by Auth / DaemonAuth via withAuthedUserID) and falls back
+// to the client IP otherwise. Designed for authenticated write
+// endpoints where the user is the right bucket key.
+//
+// The lookup intentionally avoids the X-User-ID request header:
+// headers are request-controlled on any route that has not yet gone
+// through an authenticator, so keying the bucket off a header would
+// let an attacker supply the limiter key the moment this middleware
+// gets mounted on a partially-authenticated or future public route.
+// JEE-12 N-1 — close the header-trust gap before the next route adds
+// the dependency.
 func UserOrIPRateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := "ip:" + clientIP(r)
-			if userID := r.Header.Get("X-User-ID"); userID != "" {
+			if userID := AuthedUserIDFromContext(r.Context()); userID != "" {
 				key = "user:" + userID
 			}
 			if !rl.Allow(key) {

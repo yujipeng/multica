@@ -16,6 +16,32 @@ import (
 
 func uuidToString(u pgtype.UUID) string { return util.UUIDToString(u) }
 
+// authContextKey is the package-private key under which Auth and
+// DaemonAuth stamp the verified user_id. Downstream middlewares (e.g.
+// UserOrIPRateLimit) read from this context — never from the
+// request-controlled X-User-ID header — so that adding the rate
+// limiter to a future route that lacks Auth cannot be tricked into
+// trusting an attacker-supplied bucket key. JEE-12 N-1.
+type authContextKey struct{}
+
+// AuthedUserIDFromContext returns the user UUID that an Auth /
+// DaemonAuth middleware verified for this request, if any. Empty
+// string when the request did not pass through an authenticator.
+func AuthedUserIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(authContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// withAuthedUserID stamps the verified user_id on the context so
+// downstream middlewares can rely on it without going through the
+// request-controlled X-User-ID header. Kept package-private —
+// only Auth and DaemonAuth are allowed to set this.
+func withAuthedUserID(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, authContextKey{}, userID)
+}
+
 // Auth middleware validates JWT tokens or Personal Access Tokens.
 // Token sources (in priority order):
 //  1. Authorization: Bearer <token> header (PAT or JWT)
@@ -54,7 +80,7 @@ func Auth(queries *db.Queries, patCache *auth.PATCache) func(http.Handler) http.
 				// UPDATE — last_used_at is bumped once per TTL window.
 				if userID, ok := patCache.Get(r.Context(), hash); ok {
 					r.Header.Set("X-User-ID", userID)
-					next.ServeHTTP(w, r)
+					next.ServeHTTP(w, r.WithContext(withAuthedUserID(r.Context(), userID)))
 					return
 				}
 
@@ -86,7 +112,7 @@ func Auth(queries *db.Queries, patCache *auth.PATCache) func(http.Handler) http.
 				// within the TTL window skip this write entirely.
 				go queries.UpdatePersonalAccessTokenLastUsed(context.Background(), pat.ID)
 
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, r.WithContext(withAuthedUserID(r.Context(), userID)))
 				return
 			}
 
@@ -156,7 +182,7 @@ func Auth(queries *db.Queries, patCache *auth.PATCache) func(http.Handler) http.
 				r.Header.Set("X-User-Email", email)
 			}
 
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(withAuthedUserID(r.Context(), sub)))
 		})
 	}
 }

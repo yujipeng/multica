@@ -650,23 +650,109 @@ func (h *Handler) IssueCliToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"token": tokenString})
 }
 
+// Logout clears the auth cookies and bumps the caller's token_version
+// so any JWT still held by the client (browser localStorage, native
+// app keychain, leaked logs) is rejected by Auth on the next request.
+//
+// SECURITY (JEE-12 B-1): the route is public so a client with an
+// expired or missing session can still clear its cookies. We must
+// therefore derive the user identity from a verifiably-signed JWT or
+// a valid PAT — NEVER from X-User-ID, which is request-controlled on
+// any unauthenticated path. With no valid credential we still 200 +
+// clear cookies (UX), but skip the DB bump entirely.
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
-	// Bump token_version so any JWT still held by the client (browser
-	// localStorage, native app keychain, leaked logs) is rejected by
-	// the Auth middleware on the next request. Cookie/CSRF clear is
-	// best-effort UX — token_version is the actual revocation.
-	// Only attempt the bump when the request was authenticated; the
-	// route is behind middleware.Auth so userID is expected, but log
-	// without failing if it is missing or invalid.
-	if userID := requestUserID(r); userID != "" {
-		if uid, err := util.ParseUUID(userID); err == nil {
-			if _, bumpErr := h.Queries.BumpUserTokenVersion(r.Context(), uid); bumpErr != nil {
-				slog.Warn("logout: failed to bump token_version", "user_id", userID, "error", bumpErr)
-			}
+	if uid, ok := h.authedUserIDFromRequest(r); ok {
+		if _, bumpErr := h.Queries.BumpUserTokenVersion(r.Context(), uid); bumpErr != nil {
+			slog.Warn("logout: failed to bump token_version", "error", bumpErr)
 		}
 	}
 	auth.ClearAuthCookies(w)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+}
+
+// authedUserIDFromRequest verifies the caller's credential locally
+// (without leaning on middleware.Auth — Logout is on the public group)
+// and returns the user UUID it identifies. Returns ok=false for any
+// missing, malformed, expired, or revoked credential so callers can
+// silently skip side-effects rather than 401-ing the request.
+//
+// Order matches middleware.Auth: Authorization: Bearer takes
+// precedence over the multica_auth cookie. PAT tokens (mul_ prefix)
+// are looked up via the hashed token; JWTs are HS256-verified with
+// the same secret used to mint them. Revoked-by-tv tokens are
+// rejected here too — bumping again would be a no-op anyway.
+func (h *Handler) authedUserIDFromRequest(r *http.Request) (pgtype.UUID, bool) {
+	token, _ := extractTokenFromRequest(r)
+	if token == "" {
+		return pgtype.UUID{}, false
+	}
+
+	if strings.HasPrefix(token, "mul_") {
+		hash := auth.HashToken(token)
+		pat, err := h.Queries.GetPersonalAccessTokenByHash(r.Context(), hash)
+		if err != nil {
+			return pgtype.UUID{}, false
+		}
+		return pat.UserID, true
+	}
+
+	parsed, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return auth.JWTSecret(), nil
+	})
+	if err != nil || !parsed.Valid {
+		return pgtype.UUID{}, false
+	}
+	claims, ok := parsed.Claims.(jwt.MapClaims)
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	sub, ok := claims["sub"].(string)
+	if !ok || strings.TrimSpace(sub) == "" {
+		return pgtype.UUID{}, false
+	}
+	uid, err := util.ParseUUID(sub)
+	if err != nil {
+		return pgtype.UUID{}, false
+	}
+
+	// Honour token_version: a revoked JWT must not be the source of
+	// further bumps. The DB error path falls through to "not authed"
+	// rather than allow on error here — Logout is rare, so failing
+	// closed on a transient DB blip is acceptable.
+	if currentTV, err := h.Queries.GetUserTokenVersion(r.Context(), uid); err == nil {
+		claimTV := int32(0)
+		switch raw := claims["tv"].(type) {
+		case float64:
+			claimTV = int32(raw)
+		case int:
+			claimTV = int32(raw)
+		case int64:
+			claimTV = int32(raw)
+		}
+		if claimTV < currentTV {
+			return pgtype.UUID{}, false
+		}
+	}
+
+	return uid, true
+}
+
+// extractTokenFromRequest mirrors middleware/auth.go:extractToken so
+// Logout (which sits outside middleware.Auth) can reach the same
+// credential. Bearer takes precedence over the auth cookie.
+func extractTokenFromRequest(r *http.Request) (string, bool) {
+	if h := r.Header.Get("Authorization"); h != "" {
+		if tok := strings.TrimPrefix(h, "Bearer "); tok != h {
+			return tok, false
+		}
+	}
+	if c, err := r.Cookie(auth.AuthCookieName); err == nil && c.Value != "" {
+		return c.Value, true
+	}
+	return "", false
 }
 
 func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {

@@ -94,9 +94,12 @@ func TestUserOrIPRateLimit_KeysByUser(t *testing.T) {
 	}))
 
 	// Same IP, two distinct users → both pass (bucketed by user).
+	// User identity must come from the context (set by Auth /
+	// DaemonAuth via withAuthedUserID), NOT the X-User-ID header —
+	// see UserOrIPRateLimit doc + JEE-12 N-1.
 	req := httptest.NewRequest(http.MethodPost, "/api/issues", nil)
 	req.RemoteAddr = "1.2.3.4:1234"
-	req.Header.Set("X-User-ID", "user-a")
+	req = req.WithContext(withAuthedUserID(req.Context(), "user-a"))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -105,7 +108,7 @@ func TestUserOrIPRateLimit_KeysByUser(t *testing.T) {
 
 	req2 := httptest.NewRequest(http.MethodPost, "/api/issues", nil)
 	req2.RemoteAddr = "1.2.3.4:1234"
-	req2.Header.Set("X-User-ID", "user-b")
+	req2 = req2.WithContext(withAuthedUserID(req2.Context(), "user-b"))
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, req2)
 	if w2.Code != http.StatusOK {
@@ -115,7 +118,7 @@ func TestUserOrIPRateLimit_KeysByUser(t *testing.T) {
 	// Second request for user-a → 429.
 	req3 := httptest.NewRequest(http.MethodPost, "/api/issues", nil)
 	req3.RemoteAddr = "1.2.3.4:1234"
-	req3.Header.Set("X-User-ID", "user-a")
+	req3 = req3.WithContext(withAuthedUserID(req3.Context(), "user-a"))
 	w3 := httptest.NewRecorder()
 	h.ServeHTTP(w3, req3)
 	if w3.Code != http.StatusTooManyRequests {
@@ -129,5 +132,38 @@ func TestClientIP_XForwardedFor(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "203.0.113.1, 10.0.0.1")
 	if got := clientIP(req); got != "203.0.113.1" {
 		t.Fatalf("expected leftmost XFF entry, got %q", got)
+	}
+}
+
+// TestUserOrIPRateLimit_IgnoresXUserIDHeader anchors JEE-12 N-1: the
+// limiter MUST NOT trust the request-controlled X-User-ID header for
+// its bucket key. If it did, two requests from the same IP claiming
+// different X-User-ID values would land in separate buckets and the
+// limit would be trivially bypassable.
+func TestUserOrIPRateLimit_IgnoresXUserIDHeader(t *testing.T) {
+	rl := NewRateLimiter(1, time.Hour)
+	mw := UserOrIPRateLimit(rl)
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// No context user; only header. Both requests share the same IP
+	// bucket, so the second must 429 — proving the header is ignored.
+	req1 := httptest.NewRequest(http.MethodPost, "/api/issues", nil)
+	req1.RemoteAddr = "9.9.9.9:1234"
+	req1.Header.Set("X-User-ID", "spoof-a")
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first request should pass, got %d", w1.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/issues", nil)
+	req2.RemoteAddr = "9.9.9.9:1234"
+	req2.Header.Set("X-User-ID", "spoof-b") // different claimed user, same IP
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusTooManyRequests {
+		t.Fatalf("header-claimed user must not get its own bucket; expected 429, got %d", w2.Code)
 	}
 }

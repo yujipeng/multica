@@ -136,6 +136,7 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 				if userID, ok := patCache.Get(r.Context(), hash); ok {
 					r.Header.Set("X-User-ID", userID)
 					ctx := context.WithValue(r.Context(), ctxKeyDaemonAuthPath, DaemonAuthPathPAT)
+					ctx = withAuthedUserID(ctx, userID)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -165,6 +166,7 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 				go queries.UpdatePersonalAccessTokenLastUsed(context.Background(), pat.ID)
 
 				ctx := context.WithValue(r.Context(), ctxKeyDaemonAuthPath, DaemonAuthPathPAT)
+				ctx = withAuthedUserID(ctx, userID)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -215,6 +217,7 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 			}
 			r.Header.Set("X-User-ID", sub)
 			ctx := context.WithValue(r.Context(), ctxKeyDaemonAuthPath, DaemonAuthPathJWT)
+			ctx = withAuthedUserID(ctx, sub)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
