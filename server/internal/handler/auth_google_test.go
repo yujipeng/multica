@@ -22,7 +22,7 @@ import (
 
 func TestResolveGoogleRedirectURI_EmptyRequestUsesPrimary(t *testing.T) {
 	t.Setenv("GOOGLE_REDIRECT_URI", "https://app.example.com/auth/callback")
-	t.Setenv("GOOGLE_REDIRECT_URI_ALLOWLIST", "")
+	t.Setenv(allowedGoogleRedirectURIsEnv, "")
 	got, err := resolveGoogleRedirectURI("")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -34,7 +34,7 @@ func TestResolveGoogleRedirectURI_EmptyRequestUsesPrimary(t *testing.T) {
 
 func TestResolveGoogleRedirectURI_AllowsMatchingValue(t *testing.T) {
 	t.Setenv("GOOGLE_REDIRECT_URI", "https://app.example.com/auth/callback")
-	t.Setenv("GOOGLE_REDIRECT_URI_ALLOWLIST", "multica://oauth/callback,https://staging.example.com/auth/callback")
+	t.Setenv(allowedGoogleRedirectURIsEnv, "multica://oauth/callback,https://staging.example.com/auth/callback")
 	got, err := resolveGoogleRedirectURI("multica://oauth/callback")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -49,7 +49,7 @@ func TestResolveGoogleRedirectURI_RejectsAttackerValue(t *testing.T) {
 	// Google. With only the primary set, anything but that primary must
 	// fail closed.
 	t.Setenv("GOOGLE_REDIRECT_URI", "https://app.example.com/auth/callback")
-	t.Setenv("GOOGLE_REDIRECT_URI_ALLOWLIST", "")
+	t.Setenv(allowedGoogleRedirectURIsEnv, "")
 	if _, err := resolveGoogleRedirectURI("https://attacker.example.com/steal"); err == nil {
 		t.Fatal("expected attacker redirect_uri to be rejected")
 	}
@@ -57,7 +57,7 @@ func TestResolveGoogleRedirectURI_RejectsAttackerValue(t *testing.T) {
 
 func TestResolveGoogleRedirectURI_RejectsWhenUnconfigured(t *testing.T) {
 	t.Setenv("GOOGLE_REDIRECT_URI", "")
-	t.Setenv("GOOGLE_REDIRECT_URI_ALLOWLIST", "")
+	t.Setenv(allowedGoogleRedirectURIsEnv, "")
 	if _, err := resolveGoogleRedirectURI(""); err == nil {
 		t.Fatal("expected error when neither env var is set")
 	}
@@ -89,7 +89,7 @@ func TestGoogleLogin_RejectsBadRedirectURI(t *testing.T) {
 	t.Setenv("GOOGLE_CLIENT_ID", "client-123")
 	t.Setenv("GOOGLE_CLIENT_SECRET", "shh")
 	t.Setenv("GOOGLE_REDIRECT_URI", "https://app.example.com/auth/callback")
-	t.Setenv("GOOGLE_REDIRECT_URI_ALLOWLIST", "")
+	t.Setenv(allowedGoogleRedirectURIsEnv, "")
 
 	body := mustMarshal(t, map[string]string{
 		"code":         "abc",
@@ -118,7 +118,7 @@ func TestGoogleLogin_RejectsMissingIDToken(t *testing.T) {
 	t.Setenv("GOOGLE_CLIENT_ID", "client-123")
 	t.Setenv("GOOGLE_CLIENT_SECRET", "shh")
 	t.Setenv("GOOGLE_REDIRECT_URI", "https://app.example.com/auth/callback")
-	t.Setenv("GOOGLE_REDIRECT_URI_ALLOWLIST", "")
+	t.Setenv(allowedGoogleRedirectURIsEnv, "")
 
 	// Stand up a fake Google token endpoint that returns access_token only.
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +156,7 @@ func TestGoogleLogin_RejectsForgedIDToken(t *testing.T) {
 	t.Setenv("GOOGLE_CLIENT_ID", "client-123")
 	t.Setenv("GOOGLE_CLIENT_SECRET", "shh")
 	t.Setenv("GOOGLE_REDIRECT_URI", "https://app.example.com/auth/callback")
-	t.Setenv("GOOGLE_REDIRECT_URI_ALLOWLIST", "")
+	t.Setenv(allowedGoogleRedirectURIsEnv, "")
 
 	// Mint an id_token for a *different* aud than client-123.
 	priv, _ := rsa.GenerateKey(rand.Reader, 2048)

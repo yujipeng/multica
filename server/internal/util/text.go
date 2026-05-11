@@ -46,3 +46,23 @@ func UnescapeBackslashEscapes(s string) string {
 	}
 	return b.String()
 }
+
+// SplitAndTrim parses a comma-separated env-style allowlist into a slice of
+// trimmed, non-empty values. Empty input returns a nil slice. This is the
+// canonical helper for the ALLOWED_* family of envs — keep every allowlist
+// parser in the codebase routed through here so they share trim / empty-skip
+// semantics.
+func SplitAndTrim(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}

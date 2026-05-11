@@ -21,6 +21,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/logger"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -455,23 +456,26 @@ func googleTokenEndpoint() string {
 	return "https://oauth2.googleapis.com/token"
 }
 
+// allowedGoogleRedirectURIsEnv is the comma-separated allowlist env. Keeping
+// the ALLOWED_* prefix matches the existing ALLOWED_EMAILS / ALLOWED_EMAIL_DOMAINS
+// convention so operators don't have to remember two spellings. Exposed as a
+// const so tests and docs reference the same string.
+const allowedGoogleRedirectURIsEnv = "ALLOWED_GOOGLE_REDIRECT_URIS"
+
 // allowedGoogleRedirectURIs returns the server-side allowlist of acceptable
 // redirect_uri values. The list is the union of GOOGLE_REDIRECT_URI (the
-// primary callback) and the optional comma-separated GOOGLE_REDIRECT_URI_ALLOWLIST
-// for deployments that legitimately serve multiple front-ends (e.g. web +
-// desktop custom-scheme callback). The client never picks freely — it must
-// echo back one of these values verbatim, so an attacker cannot tamper with
-// the redirect_uri to intercept the authorization code.
+// primary callback) and the optional comma-separated
+// ALLOWED_GOOGLE_REDIRECT_URIS for deployments that legitimately serve
+// multiple front-ends (e.g. web + desktop custom-scheme callback). The
+// client never picks freely — it must echo back one of these values
+// verbatim, so an attacker cannot tamper with the redirect_uri to intercept
+// the authorization code.
 func allowedGoogleRedirectURIs() []string {
 	out := make([]string, 0, 2)
 	if primary := strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URI")); primary != "" {
 		out = append(out, primary)
 	}
-	for _, raw := range strings.Split(os.Getenv("GOOGLE_REDIRECT_URI_ALLOWLIST"), ",") {
-		uri := strings.TrimSpace(raw)
-		if uri == "" {
-			continue
-		}
+	for _, uri := range util.SplitAndTrim(os.Getenv(allowedGoogleRedirectURIsEnv)) {
 		dup := false
 		for _, existing := range out {
 			if existing == uri {

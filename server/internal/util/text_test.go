@@ -47,3 +47,30 @@ func TestUnescapeBackslashEscapes(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitAndTrim(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty returns nil", "", nil},
+		{"single value", "a", []string{"a"}},
+		{"trims surrounding whitespace", "  a  ,  b ", []string{"a", "b"}},
+		{"skips empty entries", "a,,b,", []string{"a", "b"}},
+		{"all-empty input returns empty slice", " , , ", []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SplitAndTrim(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("SplitAndTrim(%q) length: got %d (%v) want %d (%v)", tt.in, len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("SplitAndTrim(%q)[%d] = %q, want %q", tt.in, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

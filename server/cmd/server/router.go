@@ -584,16 +584,5 @@ func parseUUID(s string) pgtype.UUID {
 }
 
 func splitAndTrim(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	res := make([]string, 0, len(parts))
-	for _, p := range parts {
-		trimmed := strings.TrimSpace(p)
-		if trimmed != "" {
-			res = append(res, trimmed)
-		}
-	}
-	return res
+	return util.SplitAndTrim(s)
 }
